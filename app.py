@@ -5,15 +5,14 @@ import tempfile
 import requests
 from PIL import Image
 from collections import defaultdict
-import threading
-import os
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 # === CONFIGURAÇÕES DO ROBOFLOW ===
 ROBOFLOW_API_KEY = "PIBBw04VbkhOIoOLFq42"
 ROBOFLOW_MODEL = "tcc-visao-computacional-epi-v2-isyfu/2"
 ROBOFLOW_URL = f"https://detect.roboflow.com/{ROBOFLOW_MODEL}?api_key={ROBOFLOW_API_KEY}"
 
-# === DETECÇÃO ===
+# === FUNÇÃO DE DETECÇÃO ===
 def detectar_epi_em_frame(frame, contador=None):
     if contador is None:
         contador = defaultdict(int)
@@ -26,7 +25,6 @@ def detectar_epi_em_frame(frame, contador=None):
     )
 
     if response.status_code != 200:
-        print("Erro API:", response.text)
         return frame, contador
 
     preds = response.json().get("predictions", [])
@@ -46,6 +44,7 @@ def detectar_epi_em_frame(frame, contador=None):
 
     return frame, contador
 
+
 # === PROCESSA IMAGEM ===
 def processar_imagem(pil_image):
     contador = defaultdict(int)
@@ -54,6 +53,7 @@ def processar_imagem(pil_image):
     result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
     return result_rgb, contador
 
+
 # === PROCESSA VÍDEO ===
 def processar_video_em_tempo_real(uploaded_file):
     contador = defaultdict(int)
@@ -61,7 +61,7 @@ def processar_video_em_tempo_real(uploaded_file):
     tfile.write(uploaded_file.read())
     cap = cv2.VideoCapture(tfile.name)
 
-    frame_display = st.empty()  # Elemento que será atualizado com cada frame
+    frame_display = st.empty()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -76,40 +76,21 @@ def processar_video_em_tempo_real(uploaded_file):
     return contador
 
 
-# === INICIAR WEBCAM ===
-def iniciar_webcam():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Erro ao acessar a webcam.")
-        return
+# === CLASSE PARA STREAMING WEBCAM ===
+class VideoTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.contador = defaultdict(int)
 
-    st.info("Pressione Q para encerrar a janela da webcam.")
-    contador = defaultdict(int)
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img, self.contador = detectar_epi_em_frame(img, self.contador)
+        return img
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
 
-        frame, contador = detectar_epi_em_frame(frame, contador)
-        cv2.imshow("🦺 Detecção de EPIs (pressione Q para sair)", frame)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    print("\nRelatório da Webcam:")
-    for epi, qtd in contador.items():
-        print(f"{epi}: {qtd}")
-
-# === STREAMLIT ===
+# === INTERFACE STREAMLIT ===
 st.set_page_config(page_title="Detecção de EPIs", layout="wide")
 
-
 st.title("🦺 Sistema de Detecção de EPIs")
-
 st.sidebar.title("🔧 Menu")
 aba = st.sidebar.radio("Escolha uma opção", ["Imagem", "Vídeo", "Webcam ao vivo"])
 
@@ -133,7 +114,7 @@ elif aba == "Vídeo":
     st.header("🎥 Detecção de EPI em Vídeo")
     uploaded_video = st.file_uploader("Envie um vídeo", type=["mp4", "avi", "mov"])
     if uploaded_video:
-        st.video(uploaded_video)  # Mostra o vídeo original
+        st.video(uploaded_video)
         st.write("🔍 Processando vídeo...")
 
         with st.spinner("Processando em tempo real..."):
@@ -146,6 +127,4 @@ elif aba == "Vídeo":
 
 elif aba == "Webcam ao vivo":
     st.header("📷 Detecção de EPI pela Webcam")
-    if st.button("Iniciar Webcam"):
-        threading.Thread(target=iniciar_webcam).start()
-        
+    webrtc_streamer(key="epi-detection", video_transformer_factory=VideoTransformer)
