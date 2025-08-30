@@ -32,8 +32,10 @@ def detectar_epi_em_frame(frame, contador=None):
         frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 0, 255), 10)
         return frame, contador
 
-    preds = response.json().get("predictions", [])
-    
+    preds = response.json().get("Predictions", [])  # Note: "Predictions" com P maiúsculo
+    if not preds:
+        preds = response.json().get("predictions", [])  # Fallback para minúsculo
+
     # Verifica se há detecções
     if len(preds) > 0:
         epi_detectado = True
@@ -51,13 +53,10 @@ def detectar_epi_em_frame(frame, contador=None):
         cv2.putText(frame, f"{class_name} ({conf:.2f})", (pt1[0], pt1[1] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    # Adiciona borda colorida baseada na detecção
-    if epi_detectado:
-        # Borda verde quando EPI é detectado
-        frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 255, 0), 10)
-    else:
-        # Borda vermelha quando nenhum EPI é detectado
-        frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 0, 255), 10)
+    # Adiciona borda colorida baseada na detecção (APÓS processar todas as predições)
+    border_color = (0, 255, 0) if epi_detectado else (0, 0, 255)  # Verde se detectado, Vermelho se não
+    border_thickness = 10
+    frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), border_color, border_thickness)
 
     return frame, contador
 
@@ -111,18 +110,31 @@ st.title("🦺 Sistema de Detecção de EPIs")
 st.sidebar.title("🔧 Menu")
 aba = st.sidebar.radio("Escolha uma opção", ["Imagem", "Vídeo", "Webcam ao vivo"])
 
+# Adicionar instruções de cores
+st.sidebar.info("""
+**Legenda de Cores:**
+- 🟢 **Borda Verde**: EPI detectado
+- 🔴 **Borda Vermelha**: Nenhum EPI detectado
+""")
+
 if aba == "Imagem":
     st.header("📸 Detecção de EPI em Imagem")
     uploaded_image = st.file_uploader("Envie uma imagem", type=["jpg", "jpeg", "png"])
     if uploaded_image:
         pil_img = Image.open(uploaded_image)
-        st.image(pil_img, caption="Imagem Original", width=400)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image(pil_img, caption="Imagem Original", use_container_width=True)
 
         with st.spinner("🔍 Processando imagem..."):
             resultado, contador = processar_imagem(pil_img)
-            st.image(resultado, caption="Resultado com EPIs", width=400)
+            
+        with col2:
+            st.image(resultado, caption="Resultado com Detecção", use_container_width=True)
 
         if contador:
+            st.success("✅ EPIs detectados!")
             st.subheader("📄 Relatório de EPIs Detectados")
             for epi, qtd in contador.items():
                 st.markdown(f"- **{epi}**: {qtd}")
@@ -134,19 +146,37 @@ elif aba == "Vídeo":
     uploaded_video = st.file_uploader("Envie um vídeo", type=["mp4", "avi", "mov"])
     if uploaded_video:
         st.video(uploaded_video)
-        st.write("🔍 Processando vídeo...")
+        
+        if st.button("Iniciar Processamento do Vídeo"):
+            st.write("🔍 Processando vídeo...")
+            
+            with st.spinner("Processando em tempo real..."):
+                contador = processar_video_em_tempo_real(uploaded_video)
 
-        with st.spinner("Processando em tempo real..."):
-            contador = processar_video_em_tempo_real(uploaded_video)
-
-        if contador:
-            st.subheader("📄 Relatório de EPIs Detectados")
-            for epi, qtd in contador.items():
-                st.markdown(f"- **{epi}**: {qtd}")
-        else:
-            st.error("❌ Nenhum EPI detectado no vídeo!")
+            if contador:
+                st.success("✅ EPIs detectados!")
+                st.subheader("📄 Relatório de EPIs Detectados")
+                for epi, qtd in contador.items():
+                    st.markdown(f"- **{epi}**: {qtd}")
+            else:
+                st.error("❌ Nenhum EPI detectado no vídeo!")
 
 elif aba == "Webcam ao vivo":
     st.header("📷 Detecção de EPI pela Webcam")
     st.info("🔴 Borda vermelha = Nenhum EPI detectado | 🟢 Borda verde = EPI detectado")
-    webrtc_streamer(key="epi-detection", video_transformer_factory=VideoTransformer)
+    
+    # Adicionar um placeholder para status
+    status_placeholder = st.empty()
+    
+    webrtc_ctx = webrtc_streamer(
+        key="epi-detection", 
+        video_transformer_factory=VideoTransformer,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    )
+    
+    if webrtc_ctx.video_transformer:
+        # Atualizar status baseado no contador
+        if webrtc_ctx.video_transformer.contador:
+            status_placeholder.success("✅ EPI detectado!")
+        else:
+            status_placeholder.error("❌ Nenhum EPI detectado")
