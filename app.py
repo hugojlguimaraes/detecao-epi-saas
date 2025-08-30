@@ -16,6 +16,9 @@ ROBOFLOW_URL = f"https://detect.roboflow.com/{ROBOFLOW_MODEL}?api_key={ROBOFLOW_
 def detectar_epi_em_frame(frame, contador=None):
     if contador is None:
         contador = defaultdict(int)
+    
+    # Flag para verificar se algum EPI foi detectado
+    epi_detectado = False
 
     _, img_encoded = cv2.imencode(".jpg", frame)
     response = requests.post(
@@ -25,9 +28,15 @@ def detectar_epi_em_frame(frame, contador=None):
     )
 
     if response.status_code != 200:
+        # Desenha borda vermelha quando não há conexão com a API
+        frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 0, 255), 10)
         return frame, contador
 
     preds = response.json().get("predictions", [])
+    
+    # Verifica se há detecções
+    if len(preds) > 0:
+        epi_detectado = True
 
     for pred in preds:
         x, y = int(pred["x"]), int(pred["y"])
@@ -41,6 +50,14 @@ def detectar_epi_em_frame(frame, contador=None):
         cv2.rectangle(frame, pt1, pt2, (0, 255, 0), 2)
         cv2.putText(frame, f"{class_name} ({conf:.2f})", (pt1[0], pt1[1] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    # Adiciona borda colorida baseada na detecção
+    if epi_detectado:
+        # Borda verde quando EPI é detectado
+        frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 255, 0), 10)
+    else:
+        # Borda vermelha quando nenhum EPI é detectado
+        frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 0, 255), 10)
 
     return frame, contador
 
@@ -109,6 +126,8 @@ if aba == "Imagem":
             st.subheader("📄 Relatório de EPIs Detectados")
             for epi, qtd in contador.items():
                 st.markdown(f"- **{epi}**: {qtd}")
+        else:
+            st.error("❌ Nenhum EPI detectado na imagem!")
 
 elif aba == "Vídeo":
     st.header("🎥 Detecção de EPI em Vídeo")
@@ -124,7 +143,10 @@ elif aba == "Vídeo":
             st.subheader("📄 Relatório de EPIs Detectados")
             for epi, qtd in contador.items():
                 st.markdown(f"- **{epi}**: {qtd}")
+        else:
+            st.error("❌ Nenhum EPI detectado no vídeo!")
 
 elif aba == "Webcam ao vivo":
     st.header("📷 Detecção de EPI pela Webcam")
+    st.info("🔴 Borda vermelha = Nenhum EPI detectado | 🟢 Borda verde = EPI detectado")
     webrtc_streamer(key="epi-detection", video_transformer_factory=VideoTransformer)
