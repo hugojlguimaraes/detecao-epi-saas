@@ -20,7 +20,10 @@ def detectar_epi_em_frame(frame, contador=None):
     # Flag para verificar se algum EPI foi detectado
     epi_detectado = False
 
-    _, img_encoded = cv2.imencode(".jpg", frame)
+    # Faz uma cópia do frame para não modificar o original
+    frame_copy = frame.copy()
+    
+    _, img_encoded = cv2.imencode(".jpg", frame_copy)
     response = requests.post(
         ROBOFLOW_URL,
         files={"file": img_encoded.tobytes()},
@@ -32,17 +35,30 @@ def detectar_epi_em_frame(frame, contador=None):
         frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 0, 255), 10)
         return frame, contador
 
-    preds = response.json().get("Predictions", [])  # Note: "Predictions" com P maiúsculo
-    if not preds:
-        preds = response.json().get("predictions", [])  # Fallback para minúsculo
+    # Obtém as previsões da resposta
+    response_data = response.json()
+    
+    # Verifica diferentes possibilidades de chaves na resposta
+    preds = []
+    if "predictions" in response_data:
+        preds = response_data["predictions"]
+    elif "Predictions" in response_data:
+        preds = response_data["Predictions"]
+    
+    # DEBUG: Mostrar resposta da API no console
+    print(f"Resposta da API: {response_data}")
+    print(f"Número de detecções: {len(preds)}")
 
     # Verifica se há detecções
     if len(preds) > 0:
         epi_detectado = True
+        print(f"EPI detectado! Borda será VERDE")
 
     for pred in preds:
-        x, y = int(pred["x"]), int(pred["y"])
-        w, h = int(pred["width"]), int(pred["height"])
+        x = int(pred["x"])
+        y = int(pred["y"])
+        w = int(pred["width"])
+        h = int(pred["height"])
         class_name = pred["class"]
         conf = pred["confidence"]
         contador[class_name] += 1
@@ -53,10 +69,17 @@ def detectar_epi_em_frame(frame, contador=None):
         cv2.putText(frame, f"{class_name} ({conf:.2f})", (pt1[0], pt1[1] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    # Adiciona borda colorida baseada na detecção (APÓS processar todas as predições)
+    # Adiciona borda colorida baseada na detecção
     border_color = (0, 255, 0) if epi_detectado else (0, 0, 255)  # Verde se detectado, Vermelho se não
     border_thickness = 10
+    
+    # Desenha a borda ao redor de todo o frame
     frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), border_color, border_thickness)
+    
+    # Adiciona texto de status
+    status_text = "EPI DETECTADO" if epi_detectado else "SEM EPI"
+    text_color = (0, 255, 0) if epi_detectado else (0, 0, 255)
+    cv2.putText(frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, text_color, 2)
 
     return frame, contador
 
@@ -78,6 +101,7 @@ def processar_video_em_tempo_real(uploaded_file):
     cap = cv2.VideoCapture(tfile.name)
 
     frame_display = st.empty()
+    status_display = st.empty()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -87,6 +111,12 @@ def processar_video_em_tempo_real(uploaded_file):
         frame, contador = detectar_epi_em_frame(frame, contador)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_display.image(frame_rgb, caption="Detectando EPIs...", use_container_width=True)
+        
+        # Atualiza status
+        if contador:
+            status_display.success("✅ EPI detectado!")
+        else:
+            status_display.error("❌ Nenhum EPI detectado")
 
     cap.release()
     return contador
@@ -96,10 +126,12 @@ def processar_video_em_tempo_real(uploaded_file):
 class VideoTransformer(VideoTransformerBase):
     def __init__(self):
         self.contador = defaultdict(int)
+        self.epi_detectado = False
 
     def transform(self, frame):
         img = frame.to_ndarray(format="bgr24")
         img, self.contador = detectar_epi_em_frame(img, self.contador)
+        self.epi_detectado = len(self.contador) > 0
         return img
 
 
@@ -113,8 +145,8 @@ aba = st.sidebar.radio("Escolha uma opção", ["Imagem", "Vídeo", "Webcam ao vi
 # Adicionar instruções de cores
 st.sidebar.info("""
 **Legenda de Cores:**
-- 🟢 **Borda Verde**: EPI detectado
-- 🔴 **Borda Vermelha**: Nenhum EPI detectado
+- 🟢 **Borda Verde + Texto**: EPI detectado
+- 🔴 **Borda Vermelha + Texto**: Nenhum EPI detectado
 """)
 
 if aba == "Imagem":
