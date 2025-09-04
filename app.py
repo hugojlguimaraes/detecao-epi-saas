@@ -1,286 +1,403 @@
 import streamlit as st
 import cv2
 import numpy as np
+from ultralytics import YOLO
 import tempfile
-import requests
+import time
+import os
 from PIL import Image
-from collections import defaultdict
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
-# === CONFIGURAÇÕES DO ROBOFLOW ===
-ROBOFLOW_API_KEY = "PIBBw04VbkhOIoOLFq42"
-ROBOFLOW_MODEL = "tcc-visao-computacional-epi-v2-isyfu/2"
-ROBOFLOW_URL = f"https://detect.roboflow.com/{ROBOFLOW_MODEL}?api_key={ROBOFLOW_API_KEY}"
+# Configuração para evitar problemas de memory leak
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-# === CONFIGURAÇÕES AJUSTÁVEIS ===
-CONFIDENCE_THRESHOLD = st.sidebar.slider(
-    "🔧 Threshold de Confiança",
-    min_value=0.1,
-    max_value=0.9,
-    value=0.7,
-    step=0.05,
-    help="Aumente para reduzir falsos positivos. Valores mais altos = menos detecções, mas mais precisas"
+# Configuração da página
+st.set_page_config(
+    page_title="EPI Detection - CCTV",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-MIN_AREA = st.sidebar.slider(
-    "🔧 Área Mínima (pixels)",
-    min_value=100,
-    max_value=5000,
-    value=1000,
-    step=100,
-    help="Ignora detecções muito pequenas para reduzir falsos positivos"
-)
+# CSS personalizado
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E88E5;
+        text-align: center;
+        margin-bottom: 1rem;
+        padding: 1rem;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 15px;
+        color: white;
+    }
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 15px;
+        text-align: center;
+        margin: 0.5rem;
+        border-left: 4px solid #1E88E5;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .alert-box {
+        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin: 1rem 0;
+        font-weight: bold;
+    }
+    .success-box {
+        background: linear-gradient(135deg, #4ecdc4 0%, #44a08d 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin: 1rem 0;
+        font-weight: bold;
+    }
+    .stButton>button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 10px;
+        font-weight: bold;
+        width: 100%;
+        margin-top: 1rem;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .sidebar .sidebar-content {
+        background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# === FUNÇÃO DE DETECÇÃO ===
-def detectar_epi_em_frame(frame, contador=None):
-    if contador is None:
-        contador = defaultdict(int)
-    
-    epi_detectado = False
-    frame_copy = frame.copy()
-    
-    # Codifica e envia para a API
-    _, img_encoded = cv2.imencode(".jpg", frame_copy)
-    response = requests.post(
-        ROBOFLOW_URL,
-        files={"file": img_encoded.tobytes()},
-        data={"name": "frame.jpg"},
-    )
-
-    if response.status_code != 200:
-        # Borda vermelha em caso de erro na API
-        frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), (0, 0, 255), 10)
-        cv2.putText(frame, "ERRO NA API", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        return frame, contador
-
-    # Processa a resposta da API
-    response_data = response.json()
-    preds = []
-    if "predictions" in response_data:
-        preds = response_data["predictions"]
-    elif "Predictions" in response_data:
-        preds = response_data["Predictions"]
-    
-    # Filtra detecções por confiança e área mínima
-    preds_filtradas = []
-    for pred in preds:
-        conf = pred["confidence"]
-        w = int(pred["width"])
-        h = int(pred["height"])
-        area = w * h
+class EPIDetector:
+    def __init__(self, model_path):
+        try:
+            self.model = YOLO(model_path)
+            st.sidebar.success("✅ Modelo carregado com sucesso!")
+        except Exception as e:
+            st.sidebar.error(f"❌ Erro ao carregar modelo: {e}")
+            self.model = None
+            
+        # Classes de EPI do seu modelo treinado (baseado no sh17.yaml)
+        self.epi_classes = {
+            8: "glasses",     # Óculos - classe 8
+            9: "gloves",      # Luvas - classe 9  
+            10: "helmet",     # Capacete - classe 10
+            15: "safety-suit",# Macacão - classe 15
+            16: "safety-vest" # Colete - classe 16
+        }
         
-        if conf >= CONFIDENCE_THRESHOLD and area >= MIN_AREA:
-            preds_filtradas.append(pred)
+    def detect_epis(self, frame, confidence=0.5):
+        """Detecta EPIs no frame com confiança ajustável"""
+        if self.model is None:
+            return None
+        try:
+            results = self.model(frame, verbose=False, conf=confidence)
+            return results[0] if results else None
+        except Exception as e:
+            st.error(f"Erro na detecção: {e}")
+            return None
+
+def draw_detections(frame, results, required_epis, confidence):
+    """Desenha detecções com cores baseadas no uso de EPI"""
+    if results is None or results.boxes is None:
+        return frame, [], []
     
-    # Verifica se há detecções válidas
-    if len(preds_filtradas) > 0:
-        epi_detectado = True
-
-    # Processa cada detecção válida
-    for pred in preds_filtradas:
-        x = int(pred["x"])
-        y = int(pred["y"])
-        w = int(pred["width"])
-        h = int(pred["height"])
-        class_name = pred["class"]
-        conf = pred["confidence"]
-        contador[class_name] += 1
-
-        # Desenha bounding box
-        pt1 = (x - w // 2, y - h // 2)
-        pt2 = (x + w // 2, y + h // 2)
-        cv2.rectangle(frame, pt1, pt2, (0, 255, 0), 3)
+    detected_epis = set()
+    missing_epis = set(required_epis) if required_epis else set()
+    people_without_epi = []
+    
+    # Primeiro passada: detectar todos os EPIs
+    for box in results.boxes:
+        cls_id = int(box.cls.item())
+        conf = box.conf.item()
         
-        # Desenha label com confiança
-        label = f"{class_name} ({conf:.2f})"
-        cv2.putText(frame, label, (pt1[0], pt1[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    # Adiciona borda colorida baseada na detecção
-    border_color = (0, 255, 0) if epi_detectado else (0, 0, 255)
-    border_thickness = 12
-    frame = cv2.rectangle(frame, (0, 0), (frame.shape[1]-1, frame.shape[0]-1), border_color, border_thickness)
+        if conf < confidence:
+            continue
+            
+        if cls_id in EPI_CLASSES:
+            epi_name = EPI_CLASSES[cls_id]
+            detected_epis.add(epi_name)
+            if epi_name in missing_epis:
+                missing_epis.remove(epi_name)
     
-    # Adiciona texto de status
-    status_text = "✅ EPI DETECTADO" if epi_detectado else "❌ SEM EPI"
-    text_color = (0, 255, 0) if epi_detectado else (0, 0, 255)
-    cv2.putText(frame, status_text, (20, 40), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, text_color, 3)
+    # Segunda passada: desenhar as bounding boxes
+    for box in results.boxes:
+        cls_id = int(box.cls.item())
+        conf = box.conf.item()
+        bbox = box.xyxy[0].cpu().numpy()
+        x1, y1, x2, y2 = map(int, bbox)
+        
+        if conf < confidence:
+            continue
+            
+        if cls_id in EPI_CLASSES:  # É um EPI
+            epi_name = EPI_CLASSES[cls_id]
+            color = (0, 255, 0)  # Verde para EPI detectado
+            label = f"{epi_name} {conf:.2f}"
+            
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+            cv2.putText(frame, label, (x1, y1-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+        elif cls_id == 0:  # É uma pessoa
+            # Verifica se está sem EPIs obrigatórios
+            person_missing_epis = missing_epis.copy()
+            
+            color = (0, 0, 255) if person_missing_epis else (255, 0, 0)
+            label = "PESSOA"
+            
+            if person_missing_epis:
+                label = f"MISSING: {', '.join(person_missing_epis)}"
+                people_without_epi.append(person_missing_epis)
+            
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+            cv2.putText(frame, label, (x1, y1-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     
-    # Adiciona informações de configuração
-    config_text = f"Threshold: {CONFIDENCE_THRESHOLD} | Área min: {MIN_AREA}px"
-    cv2.putText(frame, config_text, (20, frame.shape[0] - 20), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    return frame, list(detected_epis), list(missing_epis), people_without_epi
 
-    return frame, contador
+@st.cache_resource
+def load_model():
+    """Carrega o modelo com fallback"""
+    model_paths = [
+        "models/best.pt",
+        "runs/detect/epi_correction_training/weights/best.pt", 
+        "best.pt",
+        "yolov8n.pt"  # Fallback
+    ]
+    
+    for path in model_paths:
+        if os.path.exists(path):
+            try:
+                detector = EPIDetector(path)
+                if detector.model is not None:
+                    return detector
+            except:
+                continue
+    return EPIDetector("yolov8n.pt")
 
-# === PROCESSA IMAGEM ===
-def processar_imagem(pil_image):
-    contador = defaultdict(int)
-    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-    result, contador = detectar_epi_em_frame(image, contador)
-    result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
-    return result_rgb, contador
+# Constantes globais
+EPI_CLASSES = {
+    8: "glasses", 9: "gloves", 10: "helmet", 
+    15: "safety-suit", 16: "safety-vest"
+}
 
-# === PROCESSA VÍDEO ===
-def processar_video_em_tempo_real(uploaded_file):
-    contador = defaultdict(int)
-    tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_file.read())
-    cap = cv2.VideoCapture(tfile.name)
+def main():
+    # Header
+    st.markdown('<h1 class="main-header">🛡️ SISTEMA DE DETECÇÃO DE EPI</h1>', 
+                unsafe_allow_html=True)
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ CONFIGURAÇÕES")
+        
+        # Seleção de EPIs obrigatórios
+        st.subheader("🎯 EPIs Obrigatórios")
+        required_epis = st.multiselect(
+            "Selecione os EPIs obrigatórios:",
+            ["helmet", "gloves", "safety-vest", "safety-suit", "glasses"],
+            default=["helmet", "gloves"]
+        )
+        
+        # Configurações de confiança
+        st.subheader("🔧 Configurações de Detecção")
+        confidence = st.slider("Confiança mínima:", 0.1, 0.9, 0.5, 0.05)
+        
+        # Seleção de fonte de vídeo
+        st.subheader("📹 Fonte de Vídeo")
+        video_source = st.radio(
+            "Selecione a fonte:",
+            ["Upload de vídeo", "Webcam (local)"],
+            index=0
+        )
+        
+        # Informações do sistema
+        st.subheader("ℹ️ Informações")
+        st.info("""
+        **Classes detectáveis:**
+        - 👷 Capacete (helmet)
+        - 🧤 Luvas (gloves)
+        - 🦺 Colete (safety-vest) 
+        - 🛡️ Macacão (safety-suit)
+        - 👓 Óculos (glasses)
+        """)
+    
+    # Carregar modelo
+    detector = load_model()
+    
+    # Main content
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.header("🎥 VISUALIZAÇÃO")
+        
+        if video_source == "Webcam (local)":
+            st.warning("""
+            ⚠️ **Webcam não funciona no Streamlit Cloud**
+            
+            Para usar webcam, execute localmente:
+            ```bash
+            streamlit run app.py
+            ```
+            """)
+            
+        elif video_source == "Upload de vídeo":
+            uploaded_file = st.file_uploader(
+                "📤 Faça upload de um vídeo", 
+                type=["mp4", "avi", "mov", "mkv"],
+                help="Formatos suportados: MP4, AVI, MOV, MKV"
+            )
+            
+            if uploaded_file is not None:
+                # Salvar arquivo temporário
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tfile:
+                    tfile.write(uploaded_file.read())
+                    video_path = tfile.name
+                
+                if st.button("🎯 PROCESSAR VÍDEO", type="primary", use_container_width=True):
+                    process_video(video_path, detector, required_epis, confidence)
+    
+    with col2:
+        st.header("📊 ESTATÍSTICAS")
+        
+        # Cartões de métricas
+        metric_col1, metric_col2 = st.columns(2)
+        
+        with metric_col1:
+            st.markdown("""
+            <div class="metric-card">
+                <h3>⚡ Performance</h3>
+                <p>Modelo: YOLOv8</p>
+                <p>Resolução: 640px</p>
+                <p>Confiança: {}</p>
+            </div>
+            """.format(confidence), unsafe_allow_html=True)
+        
+        with metric_col2:
+            st.markdown("""
+            <div class="metric-card">
+                <h3>🎯 Detecção</h3>
+                <p>EPIs: 5 classes</p>
+                <p>Pessoas: 1 classe</p>
+                <p>Total: 17 classes</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Legenda de cores
+        st.subheader("🎨 LEGENDA")
+        st.markdown("""
+        - <span style='color: green; font-weight: bold'>🟢 VERDE</span>: EPI detectado
+        - <span style='color: red; font-weight: bold'>🔴 VERMELHO</span>: EPI faltante
+        - <span style='color: blue; font-weight: bold'>🔵 AZUL</span>: Pessoa com EPI
+        - <span style='color: orange; font-weight: bold'>🟠 LARANJA</span>: Análise
+        """, unsafe_allow_html=True)
+        
+        # Status do sistema
+        st.subheader("📈 STATUS")
+        if detector.model is not None:
+            st.success("✅ Sistema carregado e pronto")
+        else:
+            st.error("❌ Erro ao carregar modelo")
 
-    frame_display = st.empty()
-    status_display = st.empty()
-    info_display = st.empty()
-
+def process_video(video_path, detector, required_epis, confidence):
+    """Processa vídeo com detecção de EPI"""
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        st.error("❌ Erro ao abrir o vídeo")
+        return
+    
+    # Obter informações do vídeo
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = total_frames / fps if fps > 0 else 0
+    
+    st.info(f"""
+    **📊 Informações do vídeo:**
+    - Frames: {total_frames}
+    - FPS: {fps:.1f}
+    - Duração: {duration:.1f}s
+    """)
+    
+    # Elementos da interface
+    stframe = st.empty()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+    
+    frame_count = 0
+    start_time = time.time()
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-
-        frame, contador = detectar_epi_em_frame(frame, contador)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_display.image(frame_rgb, caption="Detectando EPIs...", use_container_width=True)
         
-        # Atualiza status
-        if contador:
-            status_display.success(f"✅ EPIs detectados: {sum(contador.values())} objetos")
-            info_text = "**EPIs encontrados:**\n"
-            for epi, qtd in contador.items():
-                info_text += f"- {epi}: {qtd}\n"
-            info_display.info(info_text)
-        else:
-            status_display.error("❌ Nenhum EPI detectado")
-            info_display.info("Ajuste o threshold ou área mínima se estiver havendo falsos positivos")
-
+        # Processar frame
+        results = detector.detect_epis(frame, confidence)
+        processed_frame, detected_epis, missing_epis, people_without_epi = draw_detections(
+            frame.copy(), results, required_epis, confidence
+        )
+        
+        # Converter para RGB (Streamlit)
+        processed_frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+        
+        # Exibir frame
+        stframe.image(processed_frame_rgb, channels="RGB", use_column_width=True)
+        
+        # Atualizar métricas
+        with metrics_col1:
+            st.metric("EPIs Detectados", len(detected_epis))
+        with metrics_col2:
+            st.metric("EPIs Faltantes", len(missing_epis))
+        with metrics_col3:
+            st.metric("Pessoas", len(people_without_epi))
+        
+        # Atualizar status
+        frame_count += 1
+        elapsed_time = time.time() - start_time
+        fps_actual = frame_count / elapsed_time if elapsed_time > 0 else 0
+        
+        status_text.text(f"""
+        ⚡ Processando: {frame_count}/{total_frames} frames
+        🎯 FPS: {fps_actual:.1f}
+        ⏱️ Tempo: {elapsed_time:.1f}s
+        """)
+        
+        # Atualizar barra de progresso
+        if total_frames > 0:
+            progress_bar.progress(frame_count / total_frames)
+        
+        # Controlar velocidade de processamento
+        time.sleep(0.03)  # ~30 FPS
+    
+    # Finalização
     cap.release()
-    return contador
-
-# === CLASSE PARA STREAMING WEBCAM ===
-class VideoTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.contador = defaultdict(int)
-        self.epi_detectado = False
-
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        img, self.contador = detectar_epi_em_frame(img, self.contador)
-        self.epi_detectado = len(self.contador) > 0
-        return img
-
-# === INTERFACE STREAMLIT ===
-st.set_page_config(page_title="Detecção de EPIs", layout="wide")
-
-st.title("🦺 Sistema de Detecção de EPIs com Filtros Avançados")
-st.sidebar.title("🔧 Configurações")
-
-# Informações e instruções
-st.sidebar.info("""
-**🎯 Como usar:**
-1. Ajuste o **Threshold** para controlar a sensibilidade
-2. Ajuste a **Área Mínima** para ignorar objetos pequenos
-3. Teste com diferentes imagens/vídeos
-4. Valores recomendados:
-   - Threshold: 0.7-0.8
-   - Área Mínima: 1000-2000px
-""")
-
-st.sidebar.warning("""
-**⚠️ Problemas comuns:**
-- **Falsos positivos**: Aumente o threshold
-- **Objetos pequenos**: Aumente a área mínima
-- **Falsos negativos**: Diminua o threshold
-""")
-
-aba = st.sidebar.radio("Escolha uma opção", ["Imagem", "Vídeo", "Webcam ao vivo"])
-
-if aba == "Imagem":
-    st.header("📸 Detecção de EPI em Imagem")
-    uploaded_image = st.file_uploader("Envie uma imagem", type=["jpg", "jpeg", "png"])
+    progress_bar.empty()
+    status_text.empty()
     
-    if uploaded_image:
-        pil_img = Image.open(uploaded_image)
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.image(pil_img, caption="Imagem Original", use_container_width=True)
-
-        with st.spinner("🔍 Processando imagem..."):
-            resultado, contador = processar_imagem(pil_img)
-            
-        with col2:
-            st.image(resultado, caption="Resultado com Detecção", use_container_width=True)
-
-        # Relatório de resultados
-        st.subheader("📊 Relatório de Detecção")
-        if contador:
-            st.success(f"✅ **EPIs detectados:** {sum(contador.values())} objetos")
-            for epi, qtd in contador.items():
-                st.markdown(f"- **{epi}**: {qtd} detecções")
-        else:
-            st.error("❌ **Nenhum EPI detectado**")
-            st.info("Tente diminuir o threshold ou a área mínima nas configurações")
-
-elif aba == "Vídeo":
-    st.header("🎥 Detecção de EPI em Vídeo")
-    uploaded_video = st.file_uploader("Envie um vídeo", type=["mp4", "avi", "mov"])
+    # Estatísticas finais
+    total_time = time.time() - start_time
+    avg_fps = frame_count / total_time if total_time > 0 else 0
     
-    if uploaded_video:
-        st.video(uploaded_video)
-        
-        if st.button("🎬 Iniciar Processamento do Vídeo", type="primary"):
-            st.write("🔍 Processando vídeo...")
-            
-            with st.spinner("Processando em tempo real..."):
-                contador = processar_video_em_tempo_real(uploaded_video)
-
-            # Relatório final do vídeo
-            st.subheader("📊 Relatório Final do Vídeo")
-            if contador:
-                st.success(f"✅ **EPIs detectados no vídeo:** {sum(contador.values())} objetos no total")
-                for epi, qtd in contador.items():
-                    st.markdown(f"- **{epi}**: {qtd} detecções")
-            else:
-                st.error("❌ **Nenhum EPI detectado no vídeo inteiro**")
-                st.info("Considere ajustar as configurações para melhorar a detecção")
-
-elif aba == "Webcam ao vivo":
-    st.header("📷 Detecção de EPI pela Webcam")
-    st.info("""
-    **🎥 Modo Webcam Ativo:**
-    - Borda 🟢 VERDE = EPI detectado
-    - Borda 🔴 VERMELHA = Nenhum EPI
-    - Configurações ao lado são aplicadas em tempo real
+    st.success(f"""
+    ✅ **Processamento concluído!**
+    
+    **📊 Estatísticas:**
+    - Frames processados: {frame_count}
+    - Tempo total: {total_time:.1f}s
+    - FPS médio: {avg_fps:.1f}
+    - Velocidade: {avg_fps/fps:.1f}x tempo real
     """)
-    
-    status_placeholder = st.empty()
-    stats_placeholder = st.empty()
-    
-    webrtc_ctx = webrtc_streamer(
-        key="epi-detection", 
-        video_transformer_factory=VideoTransformer,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        media_stream_constraints={"video": True, "audio": False}
-    )
-    
-    if webrtc_ctx.video_transformer:
-        # Atualizar status baseado no contador
-        if webrtc_ctx.video_transformer.contador:
-            status_placeholder.success("✅ EPI detectado em tempo real!")
-            stats_text = "**EPIs detectados:**\n"
-            for epi, qtd in webrtc_ctx.video_transformer.contador.items():
-                stats_text += f"- {epi}: {qtd}\n"
-            stats_placeholder.info(stats_text)
-        else:
-            status_placeholder.error("❌ Nenhum EPI detectado")
-            stats_placeholder.info("Aponte a câmera para objetos com EPI")
 
-# Rodapé com informações
-st.sidebar.markdown("---")
-st.sidebar.caption("""
-**🔍 Dicas para melhorar a precisão:**
-1. Use boa iluminação
-2. Posicione os EPIs claramente visíveis
-3. Teste diferentes ângulos
-4. Ajuste as configurações conforme necessário
-""")
+if __name__ == "__main__":
+    main()
