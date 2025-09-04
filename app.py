@@ -1,11 +1,11 @@
 import streamlit as st
-import cv2
 import numpy as np
 from ultralytics import YOLO
 import tempfile
 import time
 import os
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 # Configuração para evitar problemas de memory leak
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
@@ -100,20 +100,30 @@ class EPIDetector:
         if self.model is None:
             return None
         try:
-            results = self.model(frame, verbose=False, conf=confidence)
+            # Converte numpy array para PIL Image se necessário
+            if isinstance(frame, np.ndarray):
+                pil_image = Image.fromarray(frame)
+            else:
+                pil_image = frame
+                
+            results = self.model(pil_image, verbose=False, conf=confidence)
             return results[0] if results else None
         except Exception as e:
             st.error(f"Erro na detecção: {e}")
             return None
 
-def draw_detections(frame, results, required_epis, confidence):
-    """Desenha detecções com cores baseadas no uso de EPI"""
+def draw_detections_pil(pil_image, results, required_epis, confidence):
+    """Desenha detecções usando PIL em vez de OpenCV"""
     if results is None or results.boxes is None:
-        return frame, [], []
+        return pil_image, [], [], []
     
     detected_epis = set()
     missing_epis = set(required_epis) if required_epis else set()
     people_without_epi = []
+    
+    # Cria uma cópia da imagem para desenhar
+    draw_image = pil_image.copy()
+    draw = ImageDraw.Draw(draw_image)
     
     # Primeiro passada: detectar todos os EPIs
     for box in results.boxes:
@@ -141,29 +151,31 @@ def draw_detections(frame, results, required_epis, confidence):
             
         if cls_id in EPI_CLASSES:  # É um EPI
             epi_name = EPI_CLASSES[cls_id]
-            color = (0, 255, 0)  # Verde para EPI detectado
+            color = "green"  # Verde para EPI detectado
             label = f"{epi_name} {conf:.2f}"
             
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-            cv2.putText(frame, label, (x1, y1-10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            # Desenha retângulo
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+            # Desenha texto
+            draw.text((x1, y1-25), label, fill=color)
             
         elif cls_id == 0:  # É uma pessoa
             # Verifica se está sem EPIs obrigatórios
             person_missing_epis = missing_epis.copy()
             
-            color = (0, 0, 255) if person_missing_epis else (255, 0, 0)
+            color = "red" if person_missing_epis else "blue"
             label = "PESSOA"
             
             if person_missing_epis:
                 label = f"MISSING: {', '.join(person_missing_epis)}"
                 people_without_epi.append(person_missing_epis)
             
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
-            cv2.putText(frame, label, (x1, y1-10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            # Desenha retângulo
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+            # Desenha texto
+            draw.text((x1, y1-25), label, fill=color)
     
-    return frame, list(detected_epis), list(missing_epis), people_without_epi
+    return draw_image, list(detected_epis), list(missing_epis), people_without_epi
 
 @st.cache_resource
 def load_model():
@@ -191,6 +203,57 @@ EPI_CLASSES = {
     15: "safety-suit", 16: "safety-vest"
 }
 
+def process_video(video_path, detector, required_epis, confidence):
+    """Processa vídeo com detecção de EPI usando apenas PIL"""
+    try:
+        # Tenta abrir o vídeo com PIL (para frames individuais)
+        # Para processamento de vídeo completo, precisaríamos de uma abordagem diferente
+        # Vamos processar apenas o primeiro frame como demonstração
+        pil_image = Image.open(video_path)
+        
+        # Processar frame
+        results = detector.detect_epis(pil_image, confidence)
+        processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
+            pil_image, results, required_epis, confidence
+        )
+        
+        # Exibir resultados
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📸 Imagem Original")
+            st.image(pil_image, use_column_width=True)
+        
+        with col2:
+            st.subheader("🎯 Imagem Processada")
+            st.image(processed_image, use_column_width=True)
+        
+        # Estatísticas
+        st.subheader("📊 Estatísticas de Detecção")
+        col3, col4, col5 = st.columns(3)
+        
+        with col3:
+            st.metric("EPIs Detectados", len(detected_epis))
+            if detected_epis:
+                st.write("✅ " + ", ".join(detected_epis))
+        
+        with col4:
+            st.metric("EPIs Faltantes", len(missing_epis))
+            if missing_epis:
+                st.write("❌ " + ", ".join(missing_epis))
+        
+        with col5:
+            st.metric("Pessoas sem EPI", len(people_without_epi))
+        
+        # Alertas
+        if missing_epis:
+            st.error(f"🚨 ALERTA: {len(missing_epis)} EPI(s) obrigatório(s) não detectado(s)!")
+        else:
+            st.success("✅ Todos os EPIs obrigatórios foram detectados!")
+            
+    except Exception as e:
+        st.error(f"❌ Erro ao processar a imagem: {e}")
+
 def main():
     # Header
     st.markdown('<h1 class="main-header">🛡️ SISTEMA DE DETECÇÃO DE EPI</h1>', 
@@ -212,11 +275,11 @@ def main():
         st.subheader("🔧 Configurações de Detecção")
         confidence = st.slider("Confiança mínima:", 0.1, 0.9, 0.5, 0.05)
         
-        # Seleção de fonte de vídeo
-        st.subheader("📹 Fonte de Vídeo")
-        video_source = st.radio(
+        # Seleção de fonte
+        st.subheader("📷 Fonte de Imagem")
+        image_source = st.radio(
             "Selecione a fonte:",
-            ["Upload de vídeo", "Webcam (local)"],
+            ["Upload de imagem", "Exemplo"],
             index=0
         )
         
@@ -238,33 +301,66 @@ def main():
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.header("🎥 VISUALIZAÇÃO")
+        st.header("🖼️ PROCESSAMENTO")
         
-        if video_source == "Webcam (local)":
-            st.warning("""
-            ⚠️ **Webcam não funciona no Streamlit Cloud**
-            
-            Para usar webcam, execute localmente:
-            ```bash
-            streamlit run app.py
-            ```
-            """)
-            
-        elif video_source == "Upload de vídeo":
+        if image_source == "Upload de imagem":
             uploaded_file = st.file_uploader(
-                "📤 Faça upload de um vídeo", 
-                type=["mp4", "avi", "mov", "mkv"],
-                help="Formatos suportados: MP4, AVI, MOV, MKV"
+                "📤 Faça upload de uma imagem", 
+                type=["jpg", "jpeg", "png", "bmp"],
+                help="Formatos suportados: JPG, JPEG, PNG, BMP"
             )
             
             if uploaded_file is not None:
-                # Salvar arquivo temporário
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tfile:
-                    tfile.write(uploaded_file.read())
-                    video_path = tfile.name
-                
-                if st.button("🎯 PROCESSAR VÍDEO", type="primary", use_container_width=True):
-                    process_video(video_path, detector, required_epis, confidence)
+                # Processar imagem
+                try:
+                    pil_image = Image.open(uploaded_file)
+                    
+                    if st.button("🎯 PROCESSAR IMAGEM", type="primary", use_container_width=True):
+                        # Processar frame
+                        results = detector.detect_epis(pil_image, confidence)
+                        processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
+                            pil_image, results, required_epis, confidence
+                        )
+                        
+                        # Exibir resultados
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.subheader("📸 Imagem Original")
+                            st.image(pil_image, use_column_width=True)
+                        
+                        with col2:
+                            st.subheader("🎯 Imagem Processada")
+                            st.image(processed_image, use_column_width=True)
+                        
+                        # Estatísticas
+                        st.subheader("📊 Estatísticas de Detecção")
+                        col3, col4, col5 = st.columns(3)
+                        
+                        with col3:
+                            st.metric("EPIs Detectados", len(detected_epis))
+                            if detected_epis:
+                                st.write("✅ " + ", ".join(detected_epis))
+                        
+                        with col4:
+                            st.metric("EPIs Faltantes", len(missing_epis))
+                            if missing_epis:
+                                st.write("❌ " + ", ".join(missing_epis))
+                        
+                        with col5:
+                            st.metric("Pessoas sem EPI", len(people_without_epi))
+                        
+                        # Alertas
+                        if missing_epis:
+                            st.error(f"🚨 ALERTA: {len(missing_epis)} EPI(s) obrigatório(s) não detectado(s)!")
+                        else:
+                            st.success("✅ Todos os EPIs obrigatórios foram detectados!")
+                            
+                except Exception as e:
+                    st.error(f"❌ Erro ao processar a imagem: {e}")
+        
+        elif image_source == "Exemplo":
+            st.info("📝 Modo de exemplo ativado. Use upload de imagem para processar suas próprias imagens.")
     
     with col2:
         st.header("📊 ESTATÍSTICAS")
@@ -298,7 +394,6 @@ def main():
         - <span style='color: green; font-weight: bold'>🟢 VERDE</span>: EPI detectado
         - <span style='color: red; font-weight: bold'>🔴 VERMELHO</span>: EPI faltante
         - <span style='color: blue; font-weight: bold'>🔵 AZUL</span>: Pessoa com EPI
-        - <span style='color: orange; font-weight: bold'>🟠 LARANJA</span>: Análise
         """, unsafe_allow_html=True)
         
         # Status do sistema
@@ -307,97 +402,6 @@ def main():
             st.success("✅ Sistema carregado e pronto")
         else:
             st.error("❌ Erro ao carregar modelo")
-
-def process_video(video_path, detector, required_epis, confidence):
-    """Processa vídeo com detecção de EPI"""
-    cap = cv2.VideoCapture(video_path)
-    
-    if not cap.isOpened():
-        st.error("❌ Erro ao abrir o vídeo")
-        return
-    
-    # Obter informações do vídeo
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    duration = total_frames / fps if fps > 0 else 0
-    
-    st.info(f"""
-    **📊 Informações do vídeo:**
-    - Frames: {total_frames}
-    - FPS: {fps:.1f}
-    - Duração: {duration:.1f}s
-    """)
-    
-    # Elementos da interface
-    stframe = st.empty()
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-    
-    frame_count = 0
-    start_time = time.time()
-    
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # Processar frame
-        results = detector.detect_epis(frame, confidence)
-        processed_frame, detected_epis, missing_epis, people_without_epi = draw_detections(
-            frame.copy(), results, required_epis, confidence
-        )
-        
-        # Converter para RGB (Streamlit)
-        processed_frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-        
-        # Exibir frame
-        stframe.image(processed_frame_rgb, channels="RGB", use_column_width=True)
-        
-        # Atualizar métricas
-        with metrics_col1:
-            st.metric("EPIs Detectados", len(detected_epis))
-        with metrics_col2:
-            st.metric("EPIs Faltantes", len(missing_epis))
-        with metrics_col3:
-            st.metric("Pessoas", len(people_without_epi))
-        
-        # Atualizar status
-        frame_count += 1
-        elapsed_time = time.time() - start_time
-        fps_actual = frame_count / elapsed_time if elapsed_time > 0 else 0
-        
-        status_text.text(f"""
-        ⚡ Processando: {frame_count}/{total_frames} frames
-        🎯 FPS: {fps_actual:.1f}
-        ⏱️ Tempo: {elapsed_time:.1f}s
-        """)
-        
-        # Atualizar barra de progresso
-        if total_frames > 0:
-            progress_bar.progress(frame_count / total_frames)
-        
-        # Controlar velocidade de processamento
-        time.sleep(0.03)  # ~30 FPS
-    
-    # Finalização
-    cap.release()
-    progress_bar.empty()
-    status_text.empty()
-    
-    # Estatísticas finais
-    total_time = time.time() - start_time
-    avg_fps = frame_count / total_time if total_time > 0 else 0
-    
-    st.success(f"""
-    ✅ **Processamento concluído!**
-    
-    **📊 Estatísticas:**
-    - Frames processados: {frame_count}
-    - Tempo total: {total_time:.1f}s
-    - FPS médio: {avg_fps:.1f}
-    - Velocidade: {avg_fps/fps:.1f}x tempo real
-    """)
 
 if __name__ == "__main__":
     main()
