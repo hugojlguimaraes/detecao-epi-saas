@@ -4,4 +4,11 @@ numpy
 Pillow
 streamlit-webrtc
 requests
-
+ultralytics==8.0.38
+streamlit==1.36.0
+ultralytics==8.3.191
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+Pillow==10.3.0
+torch==2.7.1+cpu
+torchvision==0.22.1+cpu
