@@ -11,11 +11,17 @@ import mysql.connector
 from mysql.connector import Error
 import os
 from datetime import datetime
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
 if not os.path.exists("imagens"):
     os.makedirs("imagens")
     
 def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, nome_arquivo, tipo_arquivo):
+    conn = None
+    cursor = None
     try:
         # Conexão com o banco de dados
         conn = mysql.connector.connect(
@@ -46,14 +52,18 @@ def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, n
 
             conn.commit()
             print(f"✅ Ocorrência e arquivo inseridos com sucesso. Ocorrência ID: {ocorrencia_id}")
+            return True
 
     except Error as e:
         print(f"❌ Erro ao conectar ou inserir: {e}")
         if conn:
             conn.rollback()
+        return False
     finally:
-        if conn and conn.is_connected():
+        # Fechar conexões apenas se foram abertas
+        if cursor:
             cursor.close()
+        if conn and conn.is_connected():
             conn.close()
 
 
@@ -206,8 +216,8 @@ def draw_detections_pil(pil_image, results, required_epis, confidence, epi_class
         if conf < confidence:
             continue
             
-        if cls_id in epi_classes:  # ← CORRIGIDO: usa o parâmetro epi_classes
-            epi_name = epi_classes[cls_id]  # ← CORRIGIDO
+        if cls_id in epi_classes:
+            epi_name = epi_classes[cls_id]
             detected_epis.add(epi_name)
             if epi_name in missing_epis:
                 missing_epis.remove(epi_name)
@@ -222,8 +232,8 @@ def draw_detections_pil(pil_image, results, required_epis, confidence, epi_class
         if conf < confidence:
             continue
             
-        if cls_id in epi_classes:  # ← CORRIGIDO
-            epi_name = epi_classes[cls_id]  # ← CORRIGIDO
+        if cls_id in epi_classes:  # É um EPI
+            epi_name = epi_classes[cls_id]
             color = "green"  # Verde para EPI detectado
             label = f"{epi_name} {conf:.2f}"
             
@@ -256,8 +266,7 @@ def load_model():
     model_paths = [
         "models/best.pt",
         "runs/detect/epi_correction_training/weights/best.pt", 
-        "best.pt",
-        "yolov8n.pt"  # Fallback
+        "best.pt"
     ]
     
     for path in model_paths:
@@ -265,15 +274,17 @@ def load_model():
             try:
                 detector = EPIDetector(path)
                 if detector.model is not None:
+                    st.sidebar.success(f"✅ Modelo carregado: {path}")
                     return detector
-            except:
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ Erro ao carregar {path}: {e}")
                 continue
+    
+    st.sidebar.error("❌ Nenhum modelo válido encontrado. Usando fallback.")
     return EPIDetector("yolov8n.pt")
 
 
 # Constantes globais 
-# [DÚVIDA] ESSAS CONFIGURAÇÕES PODEM SER AJUSTADAS CONFORME NECESSÁRIO? 
-# PODEMOS USAR OS MESMOS CÓDIGOS DO BANCO DE DADOS?
 EPI_CLASSES = {
     8: "glasses", 9: "gloves", 10: "helmet", 14: "boots",
     15: "safety-suit", 16: "safety-vest"
@@ -290,7 +301,7 @@ def process_video(video_path, detector, required_epis, confidence):
         # Processar frame
         results = detector.detect_epis(pil_image, confidence)
         processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
-            pil_image, results, required_epis, confidence
+            pil_image, results, required_epis, confidence, EPI_CLASSES
         )
         
         # Exibir resultados
@@ -298,11 +309,11 @@ def process_video(video_path, detector, required_epis, confidence):
         
         with col1:
             st.subheader("📸 Imagem Original")
-            st.image(pil_image,  use_container_width=True)
+            st.image(pil_image, use_container_width=True)
         
         with col2:
             st.subheader("🎯 Imagem Processada")
-            st.image(processed_image,  use_container_width=True)
+            st.image(processed_image, use_container_width=True)
         
         # Estatísticas
         st.subheader("📊 Estatísticas de Detecção")
@@ -332,6 +343,10 @@ def process_video(video_path, detector, required_epis, confidence):
 
 
 def process_webcam(detector, required_epis, confidence):
+    if detector.model is None:
+        st.error("❌ Modelo não carregado. Verifique as configurações.")
+        return
+        
     st.header("🔴 WEBCAM AO VIVO")
     st.write("Pressione 'Iniciar' para começar a detecção e 'Parar' para terminar.")
 
@@ -346,7 +361,11 @@ def process_webcam(detector, required_epis, confidence):
 
     if start_pressed and st.session_state.cap is None:
         st.session_state.cap = cv2.VideoCapture(0)
-        st.session_state.webcam_image_saved = False  # Reset ao iniciar
+        if not st.session_state.cap.isOpened():
+            st.error("❌ Webcam não disponível. Verifique a conexão.")
+            st.session_state.cap = None
+        else:
+            st.session_state.webcam_image_saved = False  # Reset ao iniciar
 
     if stop_pressed and st.session_state.cap is not None:
         st.session_state.cap.release()
@@ -355,11 +374,12 @@ def process_webcam(detector, required_epis, confidence):
     frame_placeholder = st.empty()
     stats_placeholder = st.empty()  
 
-    while st.session_state.cap is not None:
+    while st.session_state.cap is not None and st.session_state.cap.isOpened():
         ret, frame = st.session_state.cap.read()
         if not ret:
             st.error("Não foi possível ler o frame da webcam.")
-            st.session_state.cap.release()
+            if st.session_state.cap is not None:
+                st.session_state.cap.release()
             st.session_state.cap = None
             break
 
@@ -367,7 +387,7 @@ def process_webcam(detector, required_epis, confidence):
         pil_image = Image.fromarray(frame_rgb)
         results = detector.detect_epis(pil_image, confidence)
         processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
-            pil_image, results, required_epis, confidence
+            pil_image, results, required_epis, confidence, EPI_CLASSES
         )
         
         # Exibir resultados
@@ -375,10 +395,10 @@ def process_webcam(detector, required_epis, confidence):
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("📸 Imagem Original")
-                st.image(pil_image,  use_container_width=True)
+                st.image(pil_image, use_container_width=True)
             with col2:
                 st.subheader("🎯 Imagem Processada")
-                st.image(processed_image,  use_container_width=True)
+                st.image(processed_image, use_container_width=True)
 
         with stats_placeholder.container():
             st.subheader("📊 Estatísticas de Detecção")
@@ -415,7 +435,7 @@ def process_webcam(detector, required_epis, confidence):
             }
             for epi in missing_epis:
                 tipos_epi_id = epi_id_map.get(epi, 1)
-                inserir_ocorrencia_arquivo(
+                success = inserir_ocorrencia_arquivo(
                     conforme=0,
                     setores_id=1,
                     cameras_id=1,
@@ -423,9 +443,60 @@ def process_webcam(detector, required_epis, confidence):
                     nome_arquivo=nome_arquivo_img,
                     tipo_arquivo='webcam'
                 )
+                if success:
+                    st.success(f"✅ Ocorrência registrada para {epi}")
+                else:
+                    st.error(f"❌ Erro ao registrar ocorrência para {epi}")
+            
             st.session_state.webcam_image_saved = True
 
         time.sleep(0.03)  # Pequeno delay para suavizar
+
+
+def send_email_alert(image_pil, subject, body, missing_epis=None):
+    try:
+        # Configurações de email (ajuste conforme necessário)
+        sender_email = "seu_email@gmail.com"
+        sender_password = "sua_senha"
+        receiver_email = "destinatario@gmail.com"
+        smtp_server = "smtp.gmail.com"
+        smtp_port = 587
+
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = sender_email
+        msg["To"] = receiver_email
+
+        now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        full_body = f"Data e Hora do Alerta: {now}\n\n"
+
+        if missing_epis:
+            full_body += (
+                "Equipamentos Faltantes:\n- " + "\n- ".join(missing_epis) + "\n\n"
+            )
+
+        full_body += body
+        text = MIMEText(full_body)
+        msg.attach(text)
+
+        # Anexar imagem
+        buffer = io.BytesIO()
+        image_pil.save(buffer, format="JPEG")
+        image_data = buffer.getvalue()
+        image = MIMEImage(image_data, name="alerta_epi.jpg")
+        msg.attach(image)
+
+        # Enviar email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        st.toast("📧 Alerta de e-mail enviado com sucesso!")
+
+    except Exception as e:
+        st.error(
+            f"Erro ao enviar e-mail: {e}. Verifique suas configurações de email."
+        )
 
 
 def main():
@@ -435,19 +506,19 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header("⚙️ CONFIGURAÇÕES")
+        st.header("⚙️ CONFIGURAÇões")
         
         # Seleção de EPIs obrigatórios
         st.subheader("🎯 EPIs Obrigatórios")
         required_epis = st.multiselect(
             "Selecione os EPIs obrigatórios:",
             ["helmet", "gloves", "safety-vest", "safety-suit", "glasses", "boots"],
-            # default=["helmet", "gloves", "safety-vest"]
+            default=["helmet", "gloves"]
         )
         
         # Configurações de confiança
         st.subheader("🔧 Configurações de Detecção")
-        confidence = st.slider("Confiança mínima:", 0.1, 0.9, 0.5, 0.05)
+        confidence = st.slider("Confiança mínima:", 0.1, 0.9, 0.3, 0.05)
         
         # Seleção de fonte
         st.subheader("📷 Fonte de Imagem")
@@ -469,19 +540,12 @@ def main():
     
         st.subheader("📧 Teste de E-mail")
         if st.button("Enviar E-mail de Teste"):
-            if (
-                "latest_image" in st.session_state
-                and st.session_state.latest_image is not None
-            ):
-                image_to_send = st.session_state.latest_image
-                body = "Teste de envio de imagem a partir da fonte atual."
-            else:
-                # Fallback para uma imagem de teste simples se nenhuma imagem foi processada
-                image_to_send = Image.new("RGB", (200, 50), color="white")
-                draw = ImageDraw.Draw(image_to_send)
-                draw.text((10, 10), "Nenhuma imagem processada.", fill="black")
-                body = "Nenhuma imagem foi processada ainda. Este é um e-mail de teste com uma imagem de fallback."
-
+            # Fallback para uma imagem de teste simples
+            image_to_send = Image.new("RGB", (200, 50), color="white")
+            draw = ImageDraw.Draw(image_to_send)
+            draw.text((10, 10), "Imagem de teste do sistema EPI", fill="black")
+            body = "Este é um e-mail de teste do sistema de detecção de EPI."
+            
             subject = "E-mail de Teste do Sistema de Detecção de EPI"
             send_email_alert(image_to_send, subject, body)
 
@@ -505,13 +569,12 @@ def main():
                 # Processar imagem
                 try:
                     pil_image = Image.open(uploaded_file)
-                    nome_arquivo = uploaded_file.name  # Recupera o nome do arquivo
                     
                     if st.button("🎯 PROCESSAR IMAGEM", type="primary", use_container_width=True):
                         # Processar frame
                         results = detector.detect_epis(pil_image, confidence)
                         processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
-                            pil_image, results, required_epis, confidence
+                            pil_image, results, required_epis, confidence, EPI_CLASSES
                         )
                         
                         # Exibir resultados
@@ -559,14 +622,18 @@ def main():
                             }
                             for epi in missing_epis:
                                 tipos_epi_id = epi_id_map.get(epi, 1)
-                                inserir_ocorrencia_arquivo(
+                                success = inserir_ocorrencia_arquivo(
                                     conforme=0,
                                     setores_id=1,
                                     cameras_id=1,
                                     tipos_epi_id=tipos_epi_id,
                                     nome_arquivo=nome_arquivo_img,
                                     tipo_arquivo='imagem'
-                                )                             
+                                )
+                                if success:
+                                    st.success(f"✅ Ocorrência registrada para {epi}")
+                                else:
+                                    st.error(f"❌ Erro ao registrar ocorrência para {epi}")
                             
                         else:
                             st.success("✅ Todos os EPIs obrigatórios foram detectados!")
@@ -576,58 +643,6 @@ def main():
     
     elif image_source == "Webcam":
             process_webcam(detector, required_epis, confidence)
-
-    elif image_source == "Exemplo":
-        st.info(
-            "📝 Modo de exemplo ativado. Use upload de imagem para processar suas próprias imagens."
-        )
-        
-
-def send_email_alert(image_pil, subject, body, missing_epis=None):
-    try:
-        creds = st.secrets["email_credentials"]
-        sender_email = creds["sender_email"]
-        sender_password = creds["sender_password"]
-        receiver_email = creds["receiver_email"]
-        smtp_server = creds["smtp_server"]
-        smtp_port = creds["smtp_port"]
-
-        msg = MIMEMultipart()
-        msg["Subject"] = subject
-        msg["From"] = sender_email
-        msg["To"] = receiver_email
-
-        now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        full_body = f"Data e Hora do Alerta: {now}\n\n"
-
-        if missing_epis:
-            full_body += (
-                "Equipamentos Faltantes:\n- " + "\n- ".join(missing_epis) + "\n\n"
-            )
-
-        full_body += body
-        text = MIMEText(full_body)
-        msg.attach(text)
-
-        # Anexar imagem
-        buffer = io.BytesIO()
-        image_pil.save(buffer, format="JPEG")
-        image_data = buffer.getvalue()
-        image = MIMEImage(image_data, name="alerta_epi.jpg")
-        msg.attach(image)
-
-        # Enviar email
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-        st.toast("📧 Alerta de e-mail enviado com sucesso!")
-
-    except Exception as e:
-        st.error(
-            f"Erro ao enviar e-mail: {e}. Verifique suas configurações em secrets.toml"
-        )
-
 
 
 if __name__ == "__main__":
