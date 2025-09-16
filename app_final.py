@@ -13,6 +13,14 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
+# Configuração da página DEVE SER O PRIMEIRO COMANDO STREAMLIT
+st.set_page_config(
+    page_title="EPI Detection - CCTV",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # Configurações para evitar problemas no Streamlit Cloud
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
@@ -89,14 +97,6 @@ def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, n
                 conn.close()
         except Exception as e:
             print(f"❌ Erro ao fechar conexões: {e}")
-
-# Configuração da página
-st.set_page_config(
-    page_title="EPI Detection - CCTV",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # CSS personalizado
 st.markdown("""
@@ -506,149 +506,4 @@ def send_email_alert(image_pil, subject, body, missing_epis=None):
 
 def main():
     # Header
-    st.markdown('<h1 class="main-header">🛡️ SISTEMA DE DETECÇÃO DE EPI</h1>', 
-                unsafe_allow_html=True)
-    
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ CONFIGURAÇÕES")
-        
-        # Seleção de EPIs obrigatórios
-        st.subheader("🎯 EPIs Obrigatórios")
-        required_epis = st.multiselect(
-            "Selecione os EPIs obrigatórios:",
-            ["helmet", "gloves", "safety-vest", "safety-suit", "glasses", "boots"],
-            default=["helmet", "gloves"]
-        )
-        
-        # Configurações de confiança
-        st.subheader("🔧 Configurações de Detecção")
-        confidence = st.slider("Confiança mínima:", 0.1, 0.9, 0.3, 0.05)
-        
-        # Seleção de fonte
-        st.subheader("📷 Fonte de Imagem")
-        image_source = st.radio(
-            "Selecione a fonte:", ["Imagem", "Webcam"], index=0
-        )
-        
-        # Informações do sistema
-        st.subheader("ℹ️ Informações")
-        st.info("""
-        **Classes detectáveis:**
-        - 👷 Capacete (helmet)
-        - 🧤 Luvas (gloves)
-        - 🦺 Colete (safety-vest) 
-        - 🛡️ Macacão (safety-suit)
-        - 👓 Óculos (glasses)
-        - 👢 Botas (boots)
-        """)
-    
-        st.subheader("📧 Teste de E-mail")
-        if st.button("Enviar E-mail de Teste"):
-            # Fallback para uma imagem de teste simples
-            image_to_send = Image.new("RGB", (200, 50), color="white")
-            draw = ImageDraw.Draw(image_to_send)
-            draw.text((10, 10), "Imagem de teste do sistema EPI", fill="black")
-            body = "Este é um e-mail de teste do sistema de detecção de EPI."
-            
-            subject = "E-mail de Teste do Sistema de Detecção de EPI"
-            send_email_alert(image_to_send, subject, body)
-
-    # Carregar modelo
-    detector = load_model()
-    if detector is None or detector.model is None:
-        st.error("❌ Não foi possível carregar o modelo. Verifique as configurações.")
-        st.info("💡 Certifique-se de que o arquivo do modelo está na pasta correta")
-        return
-    
-    # Main content
-    st.header("🖼️ PROCESSAMENTO")
-
-    if image_source == "Imagem":
-        uploaded_file = st.file_uploader(
-            "📤 Faça upload de uma imagem", 
-            type=["jpg", "jpeg", "png", "bmp"],
-            help="Formatos suportados: JPG, JPEG, PNG, BMP"
-        )
-        
-        if uploaded_file is not None:
-            # Processar imagem
-            try:
-                pil_image = Image.open(uploaded_file)
-                
-                if st.button("🎯 PROCESSAR IMAGEM", type="primary", use_container_width=True):
-                    # Processar frame
-                    results = detector.detect_epis(pil_image, confidence)
-                    processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
-                        pil_image, results, required_epis, confidence, EPI_CLASSES
-                    )
-                    
-                    # Exibir resultados
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("📸 Imagem Original")
-                        st.image(pil_image, use_container_width=True)
-                    
-                    with col2:
-                        st.subheader("🎯 Imagem Processada")
-                        st.image(processed_image, use_container_width=True)
-                    
-                    # Estatísticas
-                    st.subheader("📊 Estatísticas de Detecção")
-                    col3, col4, col5 = st.columns(3)
-                    
-                    with col3:
-                        st.metric("EPIs Detectados", len(detected_epis))
-                        if detected_epis:
-                            st.write("✅ " + ", ".join(detected_epis))
-                    
-                    with col4:
-                        st.metric("EPIs Faltantes", len(missing_epis))
-                        if missing_epis:
-                            st.write("❌ " + ", ".join(missing_epis))
-                    
-                    with col5:
-                        st.metric("Pessoas sem EPI", len(people_without_epi))
-                    
-                    # Alertas
-                    if missing_epis:
-                        # Gera nome único usando data/hora
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        nome_arquivo_img = f"imagens/sem_epi_{timestamp}.jpg"
-                        processed_image.save(nome_arquivo_img)
-
-                        epi_id_map = {
-                            "boots": 4,
-                            "helmet": 1,
-                            "safety-suit": 5,
-                            "gloves": 3,
-                            "safety-vest": 6,
-                            "glasses": 2
-                        }
-                        for epi in missing_epis:
-                            tipos_epi_id = epi_id_map.get(epi, 1)
-                            success = inserir_ocorrencia_arquivo(
-                                conforme=0,
-                                setores_id=1,
-                                cameras_id=1,
-                                tipos_epi_id=tipos_epi_id,
-                                nome_arquivo=nome_arquivo_img,
-                                tipo_arquivo='imagem'
-                            )
-                            if success:
-                                st.success(f"✅ Ocorrência registrada para {epi}")
-                            else:
-                                st.error(f"❌ Erro ao registrar ocorrência para {epi}")
-                        
-                    else:
-                        st.success("✅ Todos os EPIs obrigatórios foram detectados!")
-                        
-            except Exception as e:
-                st.error(f"❌ Erro ao processar a imagem: {e}")
-    
-    elif image_source == "Webcam":
-        process_webcam(detector, required_epis, confidence)
-
-if __name__ == "__main__":
-    main()
+    st.markdown('<h1 class="main-header">🛡️ SISTEMA DE DETECÇÃO
