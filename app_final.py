@@ -1,20 +1,38 @@
 import streamlit as st
 import numpy as np
-from ultralytics import YOLO
 import tempfile
 import time
 import os
 from PIL import Image, ImageDraw, ImageFont
 import io
-import cv2
 import mysql.connector
 from mysql.connector import Error
-import os
 from datetime import datetime
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
+
+# Configurações para evitar problemas no Streamlit Cloud
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
+
+# Importação segura do OpenCV
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError as e:
+    st.error(f"OpenCV não disponível: {e}")
+    CV2_AVAILABLE = False
+
+# Importação segura do Ultralytics
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError as e:
+    st.error(f"YOLO não disponível: {e}")
+    YOLO_AVAILABLE = False
 
 if not os.path.exists("imagens"):
     os.makedirs("imagens")
@@ -25,11 +43,11 @@ def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, n
     try:
         # Conexão com o banco de dados
         conn = mysql.connector.connect(
-            host="localhost",      # ajuste conforme sua config
-            user="root",           # usuário do MySQL
-            password="RootMB@2025",     # senha do MySQL
-            database="epidetector", # banco
-            port=3306              # porta padrão do MySQL
+            host="localhost",
+            user="root",
+            password="RootMB@2025",
+            database="epidetector",
+            port=3306
         )
 
         if conn.is_connected():
@@ -71,10 +89,6 @@ def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, n
                 conn.close()
         except Exception as e:
             print(f"❌ Erro ao fechar conexões: {e}")
-
-
-# Configuração para evitar problemas de memory leak
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 # Configuração da página
 st.set_page_config(
@@ -146,6 +160,11 @@ st.markdown("""
 
 class EPIDetector:
     def __init__(self, model_path):
+        if not YOLO_AVAILABLE:
+            st.sidebar.error("❌ YOLO não está disponível")
+            self.model = None
+            return
+            
         try:
             self.model = YOLO(model_path)
             st.sidebar.success("✅ Modelo carregado com sucesso!")
@@ -153,7 +172,7 @@ class EPIDetector:
             st.sidebar.error(f"❌ Erro ao carregar modelo: {e}")
             self.model = None
             
-        # Classes de EPI do seu modelo treinado (baseado no sh17.yaml)
+        # Classes de EPI do seu modelo treinado
         self.epi_classes = {
             8: "glasses",     # Óculos - classe 8
             9: "gloves",      # Luvas - classe 9  
@@ -179,27 +198,6 @@ class EPIDetector:
         except Exception as e:
             st.error(f"Erro na detecção: {e}")
             return None
-
-def calculate_iou(boxA, boxB):
-    # determine the (x, y)-coordinates of the intersection rectangle
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
-
-    # compute the area of intersection rectangle
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-
-    # compute the area of both the prediction and ground-truth rectangles
-    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-
-    # compute the intersection over union by taking the intersection
-    # area and dividing it by the sum of prediction + ground-truth
-    # areas - the interesection area
-    iou = interArea / float(boxAArea + boxBArea - interArea)
-
-    return iou
 
 def draw_detections_pil(pil_image, results, required_epis, confidence, epi_classes):
     """Desenha detecções usando PIL em vez de OpenCV"""
@@ -269,6 +267,9 @@ def draw_detections_pil(pil_image, results, required_epis, confidence, epi_class
 @st.cache_resource
 def load_model():
     """Carrega o modelo com fallback"""
+    if not YOLO_AVAILABLE:
+        return None
+        
     model_paths = [
         "models/best.pt",
         "runs/detect/epi_correction_training/weights/best.pt", 
@@ -287,7 +288,6 @@ def load_model():
     
     st.sidebar.error("❌ Nenhum modelo válido encontrado.")
     return None
-
 
 # Constantes globais 
 EPI_CLASSES = {
@@ -344,8 +344,12 @@ def process_video(video_path, detector, required_epis, confidence):
     except Exception as e:
         st.error(f"❌ Erro ao processar a imagem: {e}")
 
-
 def process_webcam(detector, required_epis, confidence):
+    if not CV2_AVAILABLE:
+        st.error("❌ OpenCV não está disponível. Funcionalidade de webcam desativada.")
+        st.info("🚫 Esta funcionalidade só está disponível localmente")
+        return
+        
     if detector is None or detector.model is None:
         st.error("❌ Modelo não carregado. Verifique as configurações.")
         return
@@ -455,7 +459,6 @@ def process_webcam(detector, required_epis, confidence):
 
         time.sleep(0.03)
 
-
 def send_email_alert(image_pil, subject, body, missing_epis=None):
     try:
         # Configurações de email (ajuste conforme necessário)
@@ -500,7 +503,6 @@ def send_email_alert(image_pil, subject, body, missing_epis=None):
         st.error(
             f"Erro ao enviar e-mail: {e}. Verifique suas configurações de email."
         )
-
 
 def main():
     # Header
@@ -556,6 +558,7 @@ def main():
     detector = load_model()
     if detector is None or detector.model is None:
         st.error("❌ Não foi possível carregar o modelo. Verifique as configurações.")
+        st.info("💡 Certifique-se de que o arquivo do modelo está na pasta correta")
         return
     
     # Main content
@@ -646,7 +649,6 @@ def main():
     
     elif image_source == "Webcam":
         process_webcam(detector, required_epis, confidence)
-
 
 if __name__ == "__main__":
     main()
