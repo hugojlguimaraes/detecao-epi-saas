@@ -1,61 +1,33 @@
 import streamlit as st
 import numpy as np
+from ultralytics import YOLO
 import tempfile
 import time
 import os
 from PIL import Image, ImageDraw, ImageFont
 import io
+import cv2
 import mysql.connector
 from mysql.connector import Error
+import os
 from datetime import datetime
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-# Configuração da página DEVE SER O PRIMEIRO COMANDO STREAMLIT
-st.set_page_config(
-    page_title="EPI Detection - CCTV",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Configurações para evitar problemas no Streamlit Cloud
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
-os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
-
-# Importação segura do OpenCV
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError as e:
-    st.error(f"OpenCV não disponível: {e}")
-    CV2_AVAILABLE = False
-
-# Importação segura do Ultralytics
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError as e:
-    st.error(f"YOLO não disponível: {e}")
-    YOLO_AVAILABLE = False
-
 if not os.path.exists("imagens"):
     os.makedirs("imagens")
     
 def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, nome_arquivo, tipo_arquivo):
-    conn = None
-    cursor = None
     try:
         # Conexão com o banco de dados
         conn = mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="RootMB@2025",
-            database="epidetector",
-            port=3306
+            host="localhost",      # ajuste conforme sua config
+            user="root",           # usuário do MySQL
+            password="RootMB@2025",     # senha do MySQL
+            database="epidetector", # banco
+            port=3306              # porta padrão do MySQL
         )
 
         if conn.is_connected():
@@ -78,25 +50,27 @@ def inserir_ocorrencia_arquivo(conforme, setores_id, cameras_id, tipos_epi_id, n
 
             conn.commit()
             print(f"✅ Ocorrência e arquivo inseridos com sucesso. Ocorrência ID: {ocorrencia_id}")
-            return True
 
     except Error as e:
         print(f"❌ Erro ao conectar ou inserir: {e}")
         if conn:
             conn.rollback()
-        return False
-    except Exception as e:
-        print(f"❌ Erro inesperado: {e}")
-        return False
     finally:
-        # Fechar conexões apenas se foram abertas
-        try:
-            if cursor:
-                cursor.close()
-            if conn and conn.is_connected():
-                conn.close()
-        except Exception as e:
-            print(f"❌ Erro ao fechar conexões: {e}")
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+# Configuração para evitar problemas de memory leak
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+# Configuração da página
+st.set_page_config(
+    page_title="EPI Detection - CCTV",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # CSS personalizado
 st.markdown("""
@@ -160,11 +134,6 @@ st.markdown("""
 
 class EPIDetector:
     def __init__(self, model_path):
-        if not YOLO_AVAILABLE:
-            st.sidebar.error("❌ YOLO não está disponível")
-            self.model = None
-            return
-            
         try:
             self.model = YOLO(model_path)
             st.sidebar.success("✅ Modelo carregado com sucesso!")
@@ -172,7 +141,7 @@ class EPIDetector:
             st.sidebar.error(f"❌ Erro ao carregar modelo: {e}")
             self.model = None
             
-        # Classes de EPI do seu modelo treinado
+        # Classes de EPI do seu modelo treinado (baseado no sh17.yaml)
         self.epi_classes = {
             8: "glasses",     # Óculos - classe 8
             9: "gloves",      # Luvas - classe 9  
@@ -198,6 +167,27 @@ class EPIDetector:
         except Exception as e:
             st.error(f"Erro na detecção: {e}")
             return None
+
+def calculate_iou(boxA, boxB):
+    # determine the (x, y)-coordinates of the intersection rectangle
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    # compute the area of intersection rectangle
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+
+    # compute the area of both the prediction and ground-truth rectangles
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+
+    # compute the intersection over union by taking the intersection
+    # area and dividing it by the sum of prediction + ground-truth
+    # areas - the interesection area
+    iou = interArea / float(boxAArea + boxBArea - interArea)
+
+    return iou
 
 def draw_detections_pil(pil_image, results, required_epis, confidence, epi_classes):
     """Desenha detecções usando PIL em vez de OpenCV"""
@@ -267,13 +257,11 @@ def draw_detections_pil(pil_image, results, required_epis, confidence, epi_class
 @st.cache_resource
 def load_model():
     """Carrega o modelo com fallback"""
-    if not YOLO_AVAILABLE:
-        return None
-        
     model_paths = [
         "models/best.pt",
         "runs/detect/epi_correction_training/weights/best.pt", 
-        "best.pt"
+        "best.pt",
+        "yolov8n.pt"  # Fallback
     ]
     
     for path in model_paths:
@@ -282,12 +270,10 @@ def load_model():
                 detector = EPIDetector(path)
                 if detector.model is not None:
                     return detector
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Erro ao carregar {path}: {e}")
+            except:
                 continue
-    
-    st.sidebar.error("❌ Nenhum modelo válido encontrado.")
-    return None
+    return EPIDetector("yolov8n.pt")
+
 
 # Constantes globais 
 EPI_CLASSES = {
@@ -299,6 +285,8 @@ def process_video(video_path, detector, required_epis, confidence):
     """Processa vídeo com detecção de EPI usando apenas PIL"""
     try:
         # Tenta abrir o vídeo com PIL (para frames individuais)
+        # Para processamento de vídeo completo, precisaríamos de uma abordagem diferente
+        # Vamos processar apenas o primeiro frame como demonstração
         pil_image = Image.open(video_path)
         
         # Processar frame
@@ -312,11 +300,11 @@ def process_video(video_path, detector, required_epis, confidence):
         
         with col1:
             st.subheader("📸 Imagem Original")
-            st.image(pil_image, use_container_width=True)
+            st.image(pil_image,  use_container_width=True)
         
         with col2:
             st.subheader("🎯 Imagem Processada")
-            st.image(processed_image, use_container_width=True)
+            st.image(processed_image,  use_container_width=True)
         
         # Estatísticas
         st.subheader("📊 Estatísticas de Detecção")
@@ -344,16 +332,8 @@ def process_video(video_path, detector, required_epis, confidence):
     except Exception as e:
         st.error(f"❌ Erro ao processar a imagem: {e}")
 
+
 def process_webcam(detector, required_epis, confidence):
-    if not CV2_AVAILABLE:
-        st.error("❌ OpenCV não está disponível. Funcionalidade de webcam desativada.")
-        st.info("🚫 Esta funcionalidade só está disponível localmente")
-        return
-        
-    if detector is None or detector.model is None:
-        st.error("❌ Modelo não carregado. Verifique as configurações.")
-        return
-        
     st.header("🔴 WEBCAM AO VIVO")
     st.write("Pressione 'Iniciar' para começar a detecção e 'Parar' para terminar.")
 
@@ -368,20 +348,17 @@ def process_webcam(detector, required_epis, confidence):
 
     if start_pressed and st.session_state.cap is None:
         st.session_state.cap = cv2.VideoCapture(0)
-        if not st.session_state.cap.isOpened():
-            st.error("❌ Webcam não disponível. Verifique a conexão.")
-            st.session_state.cap = None
-        else:
-            st.session_state.webcam_image_saved = False
+        st.session_state.webcam_image_saved = False  # Reset ao iniciar
 
-    if stop_pressed and st.session_state.cap is not None:
-        st.session_state.cap.release()
+    if stop_pressed and st.session_state.cap is None:
+        if st.session_state.cap is not None:
+            st.session_state.cap.release()
         st.session_state.cap = None
 
     frame_placeholder = st.empty()
     stats_placeholder = st.empty()  
 
-    while st.session_state.cap is not None and st.session_state.cap.isOpened():
+    while st.session_state.cap is not None:
         ret, frame = st.session_state.cap.read()
         if not ret:
             st.error("Não foi possível ler o frame da webcam.")
@@ -402,10 +379,10 @@ def process_webcam(detector, required_epis, confidence):
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("📸 Imagem Original")
-                st.image(pil_image, use_container_width=True)
+                st.image(pil_image,  use_container_width=True)
             with col2:
                 st.subheader("🎯 Imagem Processada")
-                st.image(processed_image, use_container_width=True)
+                st.image(processed_image,  use_container_width=True)
 
         with stats_placeholder.container():
             st.subheader("📊 Estatísticas de Detecção")
@@ -442,7 +419,7 @@ def process_webcam(detector, required_epis, confidence):
             }
             for epi in missing_epis:
                 tipos_epi_id = epi_id_map.get(epi, 1)
-                success = inserir_ocorrencia_arquivo(
+                inserir_ocorrencia_arquivo(
                     conforme=0,
                     setores_id=1,
                     cameras_id=1,
@@ -450,59 +427,10 @@ def process_webcam(detector, required_epis, confidence):
                     nome_arquivo=nome_arquivo_img,
                     tipo_arquivo='webcam'
                 )
-                if success:
-                    st.success(f"✅ Ocorrência registrada para {epi}")
-                else:
-                    st.error(f"❌ Erro ao registrar ocorrência para {epi}")
-            
             st.session_state.webcam_image_saved = True
 
-        time.sleep(0.03)
+        time.sleep(0.03)  # Pequeno delay para suavizar
 
-def send_email_alert(image_pil, subject, body, missing_epis=None):
-    try:
-        # Configurações de email (ajuste conforme necessário)
-        sender_email = "seu_email@gmail.com"
-        sender_password = "sua_senha"
-        receiver_email = "destinatario@gmail.com"
-        smtp_server = "smtp.gmail.com"
-        smtp_port = 587
-
-        msg = MIMEMultipart()
-        msg["Subject"] = subject
-        msg["From"] = sender_email
-        msg["To"] = receiver_email
-
-        now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        full_body = f"Data e Hora do Alerta: {now}\n\n"
-
-        if missing_epis:
-            full_body += (
-                "Equipamentos Faltantes:\n- " + "\n- ".join(missing_epis) + "\n\n"
-            )
-
-        full_body += body
-        text = MIMEText(full_body)
-        msg.attach(text)
-
-        # Anexar imagem
-        buffer = io.BytesIO()
-        image_pil.save(buffer, format="JPEG")
-        image_data = buffer.getvalue()
-        image = MIMEImage(image_data, name="alerta_epi.jpg")
-        msg.attach(image)
-
-        # Enviar email
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-        st.toast("📧 Alerta de e-mail enviado com sucesso!")
-
-    except Exception as e:
-        st.error(
-            f"Erro ao enviar e-mail: {e}. Verifique suas configurações de email."
-        )
 
 def main():
     # Header
@@ -556,99 +484,142 @@ def main():
 
     # Carregar modelo
     detector = load_model()
-    if detector is None or detector.model is None:
+    if detector.model is None:
         st.error("❌ Não foi possível carregar o modelo. Verifique as configurações.")
-        st.info("💡 Certifique-se de que o arquivo do modelo está na pasta correta")
         return
     
-    # Main content
+     # Main content
     st.header("🖼️ PROCESSAMENTO")
 
     if image_source == "Imagem":
-        uploaded_file = st.file_uploader(
-            "📤 Faça upload de uma imagem", 
-            type=["jpg", "jpeg", "png", "bmp"],
-            help="Formatos suportados: JPG, JPEG, PNG, BMP"
-        )
-        
-        if uploaded_file is not None:
-            # Processar imagem
-            try:
-                pil_image = Image.open(uploaded_file)
-                
-                if st.button("🎯 PROCESSAR IMAGEM", type="primary", use_container_width=True):
-                    # Processar frame
-                    results = detector.detect_epis(pil_image, confidence)
-                    processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
-                        pil_image, results, required_epis, confidence, EPI_CLASSES
-                    )
+            uploaded_file = st.file_uploader(
+                "📤 Faça upload de uma imagem", 
+                type=["jpg", "jpeg", "png", "bmp"],
+                help="Formatos suportados: JPG, JPEG, PNG, BMP"
+            )
+            
+            if uploaded_file is not None:
+                # Processar imagem
+                try:
+                    pil_image = Image.open(uploaded_file)
                     
-                    # Exibir resultados
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("📸 Imagem Original")
-                        st.image(pil_image, use_container_width=True)
-                    
-                    with col2:
-                        st.subheader("🎯 Imagem Processada")
-                        st.image(processed_image, use_container_width=True)
-                    
-                    # Estatísticas
-                    st.subheader("📊 Estatísticas de Detecção")
-                    col3, col4, col5 = st.columns(3)
-                    
-                    with col3:
-                        st.metric("EPIs Detectados", len(detected_epis))
-                        if detected_epis:
-                            st.write("✅ " + ", ".join(detected_epis))
-                    
-                    with col4:
-                        st.metric("EPIs Faltantes", len(missing_epis))
+                    if st.button("🎯 PROCESSAR IMAGEM", type="primary", use_container_width=True):
+                        # Processar frame
+                        results = detector.detect_epis(pil_image, confidence)
+                        processed_image, detected_epis, missing_epis, people_without_epi = draw_detections_pil(
+                            pil_image, results, required_epis, confidence, EPI_CLASSES
+                        )
+                        
+                        # Exibir resultados
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.subheader("📸 Imagem Original")
+                            st.image(pil_image, use_container_width=True)
+                        
+                        with col2:
+                            st.subheader("🎯 Imagem Processada")
+                            st.image(processed_image, use_container_width=True)
+                        
+                        # Estatísticas
+                        st.subheader("📊 Estatísticas de Detecção")
+                        col3, col4, col5 = st.columns(3)
+                        
+                        with col3:
+                            st.metric("EPIs Detectados", len(detected_epis))
+                            if detected_epis:
+                                st.write("✅ " + ", ".join(detected_epis))
+                        
+                        with col4:
+                            st.metric("EPIs Faltantes", len(missing_epis))
+                            if missing_epis:
+                                st.write("❌ " + ", ".join(missing_epis))
+                        
+                        with col5:
+                            st.metric("Pessoas sem EPI", len(people_without_epi))
+                        
+                        # Alertas
                         if missing_epis:
-                            st.write("❌ " + ", ".join(missing_epis))
-                    
-                    with col5:
-                        st.metric("Pessoas sem EPI", len(people_without_epi))
-                    
-                    # Alertas
-                    if missing_epis:
-                        # Gera nome único usando data/hora
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        nome_arquivo_img = f"imagens/sem_epi_{timestamp}.jpg"
-                        processed_image.save(nome_arquivo_img)
+                            # Gera nome único usando data/hora
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            nome_arquivo_img = f"imagens/sem_epi_{timestamp}.jpg"
+                            processed_image.save(nome_arquivo_img)
 
-                        epi_id_map = {
-                            "boots": 4,
-                            "helmet": 1,
-                            "safety-suit": 5,
-                            "gloves": 3,
-                            "safety-vest": 6,
-                            "glasses": 2
-                        }
-                        for epi in missing_epis:
-                            tipos_epi_id = epi_id_map.get(epi, 1)
-                            success = inserir_ocorrencia_arquivo(
-                                conforme=0,
-                                setores_id=1,
-                                cameras_id=1,
-                                tipos_epi_id=tipos_epi_id,
-                                nome_arquivo=nome_arquivo_img,
-                                tipo_arquivo='imagem'
-                            )
-                            if success:
-                                st.success(f"✅ Ocorrência registrada para {epi}")
-                            else:
-                                st.error(f"❌ Erro ao registrar ocorrência para {epi}")
-                        
-                    else:
-                        st.success("✅ Todos os EPIs obrigatórios foram detectados!")
-                        
-            except Exception as e:
-                st.error(f"❌ Erro ao processar a imagem: {e}")
+                            epi_id_map = {
+                                "boots": 4,
+                                "helmet": 1,
+                                "safety-suit": 5,
+                                "gloves": 3,
+                                "safety-vest": 6,
+                                "glasses": 2
+                            }
+                            for epi in missing_epis:
+                                tipos_epi_id = epi_id_map.get(epi, 1)
+                                inserir_ocorrencia_arquivo(
+                                    conforme=0,
+                                    setores_id=1,
+                                    cameras_id=1,
+                                    tipos_epi_id=tipos_epi_id,
+                                    nome_arquivo=nome_arquivo_img,
+                                    tipo_arquivo='imagem'
+                                )                             
+                            
+                        else:
+                            st.success("✅ Todos os EPIs obrigatórios foram detectados!")
+                            
+                except Exception as e:
+                    st.error(f"❌ Erro ao processar a imagem: {e}")
     
     elif image_source == "Webcam":
-        process_webcam(detector, required_epis, confidence)
+            process_webcam(detector, required_epis, confidence)
+
+
+def send_email_alert(image_pil, subject, body, missing_epis=None):
+    try:
+        # Configurações de email (ajuste conforme necessário)
+        sender_email = "seu_email@gmail.com"
+        sender_password = "sua_senha"
+        receiver_email = "destinatario@gmail.com"
+        smtp_server = "smtp.gmail.com"
+        smtp_port = 587
+
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = sender_email
+        msg["To"] = receiver_email
+
+        now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        full_body = f"Data e Hora do Alerta: {now}\n\n"
+
+        if missing_epis:
+            full_body += (
+                "Equipamentos Faltantes:\n- " + "\n- ".join(missing_epis) + "\n\n"
+            )
+
+        full_body += body
+        text = MIMEText(full_body)
+        msg.attach(text)
+
+        # Anexar imagem
+        buffer = io.BytesIO()
+        image_pil.save(buffer, format="JPEG")
+        image_data = buffer.getvalue()
+        image = MIMEImage(image_data, name="alerta_epi.jpg")
+        msg.attach(image)
+
+        # Enviar email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        st.toast("📧 Alerta de e-mail enviado com sucesso!")
+
+    except Exception as e:
+        st.error(
+            f"Erro ao enviar e-mail: {e}. Verifique suas configurações de email."
+        )
+
+
 
 if __name__ == "__main__":
     main()
