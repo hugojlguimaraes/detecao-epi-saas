@@ -1,4 +1,4 @@
-streamlit==1.36.0
+streamlit==1.36.2
 numpy==1.26.4
 Pillow==10.4.0
 ultralytics==8.3.191
@@ -6,4 +6,8 @@ requests==2.32.5
 torch==2.8.0
 torchvision==0.23.0
 opencv-python-headless==4.8.0.76
+<<<<<<< HEAD
 mysql-connector-python==8.1.0
+=======
+mysql-connector-python==8.3.0
+>>>>>>> be455f9d3c53d7ab44561cb24bf748afebf4739b
