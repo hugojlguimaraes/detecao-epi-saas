@@ -1,9 +1,13 @@
 streamlit==1.22.0
 numpy==1.24.0
-pillow==9.5.0
+Pillow==9.5.0
 ultralytics==8.0.0
 requests==2.32.5
 torch==2.8.0
 torchvision==0.23.0
 opencv-python-headless==4.8.0.76
 mysql-connector-python==8.0.33
+pandas==2.3.2
+matplotlib==3.10.6
+seaborn==0.12.1
+scipy==1.15.3
