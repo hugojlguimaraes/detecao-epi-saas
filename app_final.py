@@ -1,9 +1,9 @@
-# app_final.py (funcional no Streamlit Cloud)
+# app_final.py (Streamlit 1.36.0 compatível)
 
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-from ultralytics import YOLO  # import compatível com Streamlit Cloud
+from ultralytics import YOLO
 import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
@@ -121,10 +121,11 @@ def process_image_file(pil_image, detector, required_epis, confidence):
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("📸 Imagem Original")
-        st.image(pil_image, use_container_width=True)
+        st.image(pil_image, use_column_width=True)  # <--- corrigido
+
     with col2:
         st.subheader("🎯 Imagem Processada")
-        st.image(processed_image, use_container_width=True)
+        st.image(processed_image, use_column_width=True)  # <--- corrigido
 
     col3, col4, col5 = st.columns(3)
     with col3:
