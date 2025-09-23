@@ -1,20 +1,13 @@
-# app_final.py (corrigido e funcional)
+# app_final.py (funcional no Streamlit Cloud)
 
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-from ultralytics.yolo.engine.model import YOLO
+from ultralytics import YOLO  # import compatível com Streamlit Cloud
 import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
 from datetime import datetime
-import mysql.connector
-from mysql.connector import Error
-import io
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
 
 # ====== Configuração da página ======
 st.set_page_config(
@@ -34,6 +27,7 @@ class EPIDetector:
             st.sidebar.error(f"❌ Erro ao carregar modelo: {e}")
             self.model = None
 
+        # mapeamento das classes do modelo
         self.epi_classes = {
             8: "glasses",
             9: "gloves",
@@ -71,7 +65,7 @@ def draw_detections_pil(pil_image, results, required_epis, confidence, epi_class
     draw_image = pil_image.copy()
     draw = ImageDraw.Draw(draw_image)
 
-    # Primeiro passe: identificar EPIs detectados
+    # identificar EPIs detectados
     for box in boxes:
         try:
             cls_id = int(box.cls.item())
@@ -86,7 +80,7 @@ def draw_detections_pil(pil_image, results, required_epis, confidence, epi_class
             if epi_name in missing_epis:
                 missing_epis.remove(epi_name)
 
-    # Segundo passe: desenhar boxes
+    # desenhar boxes
     for box in boxes:
         try:
             cls_id = int(box.cls.item())
@@ -123,7 +117,7 @@ def process_image_file(pil_image, detector, required_epis, confidence):
         pil_image, results, required_epis, confidence, detector.epi_classes
     )
 
-    # Layout
+    # Layout em colunas
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("📸 Imagem Original")
@@ -148,7 +142,6 @@ def process_image_file(pil_image, detector, required_epis, confidence):
 def process_webcam_camera_input(detector, required_epis, confidence):
     st.header("🔴 WEBCAM (captura)")
     st.write("Tire uma foto para processar a detecção.")
-
     img_file_buffer = st.camera_input("Use a webcam")
     if img_file_buffer is not None:
         try:
@@ -160,13 +153,12 @@ def process_webcam_camera_input(detector, required_epis, confidence):
 # ====== Carregar modelo ======
 @st.cache_resource
 def load_model():
-    model_paths = ["models/best.pt", "runs/detect/epi_correction_training/weights/best.pt", "best.pt", "yolov8n.pt"]
+    model_paths = ["models/best.pt", "best.pt", "yolov8n.pt"]
     for path in model_paths:
         if os.path.exists(path):
             detector = EPIDetector(path)
             if detector.model is not None:
                 return detector
-    # fallback
     return EPIDetector("yolov8n.pt")
 
 # ====== Main ======
@@ -186,7 +178,7 @@ def main():
     # Carregar modelo
     detector = load_model()
     if detector.model is None:
-        st.error("❌ Não foi possível carregar o modelo. Verifique o path dos weights.")
+        st.error("❌ Não foi possível carregar o modelo. Verifique os weights.")
         return
 
     st.header("🖼️ PROCESSAMENTO")
