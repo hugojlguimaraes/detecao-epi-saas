@@ -13,7 +13,6 @@ except Exception as e:
     from ultralytics import YOLO
 
 import streamlit as st
-st.write("Versão atual do Streamlit:1.36.0", st.__version__)
 import numpy as np
 import tempfile
 import time
