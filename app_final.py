@@ -13,10 +13,6 @@ except Exception as e:
     from ultralytics import YOLO
 
 import streamlit as st
-import platform
-
-st.sidebar.info(f"📌 Streamlit version: {st.__version__}")
-st.sidebar.info(f"🐍 Python version: {platform.python_version()}")
 import numpy as np
 import tempfile
 import time
